@@ -1,0 +1,40 @@
+# version: "3.8"
+
+services:
+
+  postgres:
+    image: "postgres:17"
+    env_file: ./.env
+    # environment:
+    #   POSTGRES_USER: myuser
+    #   POSTGRES_PASSWORD: mypassword
+    #   POSTGRES_DB: mydatabase
+
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - tool_network
+
+  home-screen-web:
+    image: deviptoolsaks.azurecr.io/home-screen-web
+    build: .
+    # command: uvicorn main:app --host 0.0.0.0 --port 8000
+    tty: true      # Enables TTY
+    stdin_open: true  # Keeps stdin open
+    command: /bin/sh -c "tmux new-session -d -s app 'uvicorn main:app --host 0.0.0.0 --port 8000' && tmux attach"
+    
+    env_file: ./.env
+    ports:
+      - "8000:8000"
+    networks:
+      - tool_network
+
+networks:
+  tool_network:
+    driver: bridge
+
+volumes:
+  postgres_data:

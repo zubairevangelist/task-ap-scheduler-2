@@ -1,0 +1,32 @@
+name: Purge Old Container Images from ACR
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Login to Azure (Service Principal)
+        run: |
+          az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }} 
+
+      - name: Login to Azure Container Registry
+        run: |
+          echo "${{ secrets.TEST_ACR_PASSWORD }}" | docker login ${{ secrets.TEST_ACR_NAME }} -u ${{ secrets.TEST_ACR_USERNAME }} --password-stdin
+
+      - name: Purge old images from ACR            
+        run: |
+          az acr run --registry ${{ secrets.TEST_ACR_NAME }} --cmd "acr purge --filter '*:.*' --ago 0d --keep 3 --untagged" /dev/null

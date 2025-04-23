@@ -1,0 +1,132 @@
+name: Build and Push Docker Images to ACR 
+
+on:
+  push:
+    branches:
+      - dev-home-screen
+
+env:
+  ACR_NAME: deviptoolsaks.azurecr.io
+  K8S_MANIFESTS_DIR: k8s
+
+jobs:
+  Build-and-Push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Docker Compose Manually
+        run: |
+          mkdir -p ~/.docker/cli-plugins/
+          curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose
+          chmod +x ~/.docker/cli-plugins/docker-compose
+          docker compose version
+
+      - name: Set Up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry (ACR)
+        run: |
+          echo "${{ secrets.IP_ACR_PASSWORD }}" | docker login ${{ env.ACR_NAME }} -u ${{ secrets.IP_ACR_USERNAME }} --password-stdin
+
+      - name: Get Commit SHA
+        id: get_commit_sha
+        run: echo "COMMIT_SHA=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
+
+      - name: Create .env File
+        run: |
+          cat <<EOF > .env
+          DEBUG=${{ secrets.DEBUG }}
+
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          POSTGRES_HOST=${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT=${{ secrets.POSTGRES_PORT }}
+
+          REDIS_HOST=${{ secrets.REDIS_HOST }}
+          REDIS_PORT=${{ secrets.REDIS_PORT }}
+          EOF
+        shell: bash
+
+      - name: Build and Tag Docker Images
+        run: |
+          docker compose build
+          for IMAGE in $(docker compose config | awk '/image:/ {print $2}'); do
+            IMAGE_NAME=${IMAGE/:latest/}
+            docker tag $IMAGE_NAME:latest $IMAGE_NAME:${{ env.COMMIT_SHA }}
+          done
+
+      - name: Push Docker Images to ACR
+        run: |
+          for IMAGE in $(docker compose config | awk '/image:/ {print $2}'); do
+            IMAGE_NAME=${IMAGE/:latest/}
+            docker push $IMAGE_NAME:${{ env.COMMIT_SHA }}
+          done
+
+      - name: Logout from ACR
+        run: docker logout ${{ env.ACR_NAME }}
+
+  Deploy-to-Aks:
+    needs: Build-and-Push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        run: |
+          az login --service-principal \
+            -u "${{ secrets.AZURE_CLIENT_ID }}" \
+            -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+
+      - name: Set Azure Subscription
+        run: az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: ACR Login
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Get Commit SHA
+        id: get_commit_sha
+        run: echo "COMMIT_SHA=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
+
+      - name: Get AKS Credentials
+        run: az aks get-credentials --resource-group ${{ secrets.IP_RESOURCE_GROUP }} --name ${{ secrets.IP_CLUSTER_NAME }}
+
+      - name: Update Kubernetes Manifests with New Image Tags
+        run: |
+          echo "COMMIT_SHA is: ${{ env.COMMIT_SHA }}"  # Debugging step to verify COMMIT_SHA value
+          for FILE in ${K8S_MANIFESTS_DIR}/*.yaml; do
+            sed -i "s|deviptoolsaks.azurecr.io/home-screen-web:latest|deviptoolsaks.azurecr.io/home-screen-web:${{ env.COMMIT_SHA }}|g" "$FILE"
+          done
+          echo "✅ The following Kubernetes manifests have been updated with COMMIT_SHA:"
+          grep -H "image:" ${K8S_MANIFESTS_DIR}/*.yaml
+
+          echo "🚀 Applying updated manifests to AKS..."
+          kubectl apply -f ${K8S_MANIFESTS_DIR}
+
+      - name: Verify Deployment
+        run: kubectl get pods -n home-screen
+
+  deleting-old-images:
+    needs: Deploy-to-Aks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure (Service Principal)
+        run: |
+          az login --service-principal \
+            -u ${{ secrets.AZURE_CLIENT_ID }} \
+            -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+
+      - name: Purge old images from ACR
+        run: |
+          az acr run --registry ${{ env.ACR_NAME }} \
+            --cmd "acr purge --filter '*:.*' --ago 0d --keep 3 --untagged" /dev/null

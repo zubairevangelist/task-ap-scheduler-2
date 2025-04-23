@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-screen-web
+  namespace: home-screen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: home-screen-web
+  template:
+    metadata:
+      labels:
+        app: home-screen-web
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: web
+          image: deviptoolsaks.azurecr.io/home-screen-web:latest  # Replace with your image
+          command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: app-secrets
+          env:
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-screen-web
+  namespace: home-screen
+spec:
+  selector:
+    app: home-screen-web
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP  # Use LoadBalancer if you want external access
